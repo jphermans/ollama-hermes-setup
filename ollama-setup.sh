@@ -572,25 +572,105 @@ fi
 # HUGGINGFACE MODEL IMPORT
 # ═══════════════════════════════════════════════════════════════
 show_hf_models() {
-    header "🤗 Popular HuggingFace GGUF Models"
+    header "🤗 HuggingFace GGUF Models for Your Hardware"
+
+    # Show detected hardware context
+    echo -e "  ${DIM}Detected:${R} ${B}${HW_TIER}${R} ${DIM}| RAM:${R} ${B}${RAM_GB} GB${R} ${DIM}| Disk:${R} ${B}${AVAIL_GB} GB${R}"
+    if $HAS_GPU; then
+        echo -e "  ${DIM}GPU:${R} ${B}${GPU_NAME}${R}"
+    else
+        echo -e "  ${DIM}GPU:${R} None (CPU-only)"
+    fi
+    echo
+
+    # Calculate usable RAM for models (leave 25% for OS)
+    USABLE_RAM=$(( RAM_GB * 75 / 100 ))
+    # For Apple Silicon, allow more (unified memory)
+    if $IS_APPLE_SILICON; then
+        USABLE_RAM=$(( RAM_GB * 85 / 100 ))
+    fi
+
     echo -e "  ${B}Format:${R} ${CYN}--hf-model org/repo:filename${R} ${DIM}or${R} ${CYN}--hf-model org/repo${R}"
+    echo -e "  ${B}Usable RAM:${R} ~${B}${USABLE_RAM} GB${R} ${DIM}(75% of total, leaving room for OS)${R}"
     echo
+
+    # ── Helper: show a model with fit indicator ──
+    # Args: repo, label, size_gb (number only), min_ram_gb (number only)
+    print_model() {
+        local repo="$1"
+        local label="$2"
+        local size_gb="$3"
+        local min_ram="$4"
+
+        local fit="✅ Smooth"
+        local fit_color="$GRN"
+
+        if (( min_ram > USABLE_RAM )); then
+            fit="❌ Too large"
+            fit_color="$RED"
+        elif (( min_ram > USABLE_RAM * 80 / 100 )); then
+            fit="⚠️  Tight"
+            fit_color="$YEL"
+        fi
+
+        # Disk check (convert size to integer for comparison)
+        local size_int="${size_gb%.*}"
+        if (( size_int > AVAIL_GB )); then
+            fit="❌ No disk"
+            fit_color="$RED"
+        fi
+
+        echo -e "    ${fit_color}${fit}${R}  ${CYN}${repo}${R}"
+        echo -e "           ${DIM}${label} | ~${size_gb} GB disk | needs ${min_ram} GB RAM${R}"
+    }
+
+    # ── General Purpose ──
     echo -e "  ${B}💬 General Purpose${R}"
-    echo -e "    ${CYN}bartowski/Qwen2.5-7B-Instruct-GGUF${R}        ${DIM}Q4_K_M ~4.7 GB${R}"
-    echo -e "    ${CYN}bartowski/Llama-3.1-8B-Instruct-GGUF${R}      ${DIM}Q4_K_M ~4.9 GB${R}"
-    echo -e "    ${CYN}bartowski/gemma-2-9b-it-GGUF${R}              ${DIM}Q4_K_M ~5.5 GB${R}"
     echo
+    print_model "bartowski/Llama-3.2-1B-Instruct-GGUF"     "Tiny, fast"            "1.1" 2
+    print_model "bartowski/Llama-3.2-3B-Instruct-GGUF"     "Small, balanced"       "2.0" 4
+    print_model "bartowski/Qwen2.5-7B-Instruct-GGUF"       "Strong all-rounder"   "4.7" 8
+    print_model "bartowski/Llama-3.1-8B-Instruct-GGUF"     "General purpose"       "4.9" 8
+    print_model "bartowski/gemma-2-9b-it-GGUF"             "High quality"          "5.5" 10
+    print_model "bartowski/Qwen2.5-14B-Instruct-GGUF"      "Strong reasoning"      "9.0" 14
+    print_model "bartowski/Qwen2.5-32B-Instruct-GGUF"      "Excellent quality"     "19.5" 28
+    echo
+
+    # ── Coding ──
     echo -e "  ${B}💻 Coding${R}"
-    echo -e "    ${CYN}bartowski/Qwen2.5-Coder-7B-Instruct-GGUF${R}  ${DIM}Q4_K_M ~4.7 GB${R}"
-    echo -e "    ${CYN}bartowski/Qwen2.5-Coder-14B-Instruct-GGUF${R} ${DIM}Q4_K_M ~9.0 GB${R}"
     echo
-    echo -e "  ${B}🧠 Reasoning${R}"
-    echo -e "    ${CYN}bartowski/deepseek-r1-Distill-Qwen-7B-GGUF${R} ${DIM}Q4_K_M ~4.7 GB${R}"
-    echo -e "    ${CYN}bartowski/deepseek-r1-Distill-Qwen-14B-GGUF${R}${DIM}Q4_K_M ~9.0 GB${R}"
+    print_model "bartowski/Qwen2.5-Coder-3B-Instruct-GGUF"   "Light coding"          "2.0" 4
+    print_model "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"   "Code generation"       "4.7" 8
+    print_model "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF"  "Complex multi-file"    "9.0" 14
+    print_model "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF" "Multi-language"   "9.0" 14
     echo
-    echo -e "  ${B}🔤 Embeddings${R}"
-    echo -e "    ${CYN}nomic-ai/nomic-embed-text-v1-GGUF${R}          ${DIM}~137 MB${R}"
-    echo -e "    ${CYN}mixedbread-ai/mxbai-embed-large-v1-GGUF${R}    ${DIM}~670 MB${R}"
+
+    # ── Reasoning ──
+    echo -e "  ${B}🧠 Reasoning (Chain-of-Thought)${R}"
+    echo
+    print_model "bartowski/deepseek-r1-Distill-Qwen-1.5B-GGUF" "Tiny reasoning"      "1.1" 2
+    print_model "bartowski/deepseek-r1-Distill-Qwen-7B-GGUF"   "Fast reasoning"      "4.7" 8
+    print_model "bartowski/deepseek-r1-Distill-Qwen-14B-GGUF"  "Deep reasoning"      "9.0" 14
+    print_model "bartowski/deepseek-r1-Distill-Qwen-32B-GGUF"  "Best local reasoning" "19.5" 28
+    echo
+
+    # ── Vision / Multimodal ──
+    echo -e "  ${B}🖼️ Vision / Multimodal${R}"
+    echo
+    print_model "bartowski/llama-3.2-11B-Vision-Instruct-GGUF" "Image understanding" "6.5" 12
+    print_model "bartowski/gemma-2-27B-it-GGUF"                "Large general purpose" "16.0" 24
+    echo
+
+    # ── Embeddings ──
+    echo -e "  ${B}🔤 Embeddings (for RAG / Semantic Search)${R}"
+    echo
+    print_model "nomic-ai/nomic-embed-text-v1.5-GGUF"        "Lightweight, fast"      "0.1" 1
+    print_model "mixedbread-ai/mxbai-embed-large-v1-GGUF"    "High quality retrieval" "0.7" 2
+    echo
+
+    # ── Summary ──
+    echo -e "  ${DIM}──────────────────────────────────────────${R}"
+    echo -e "  ${B}Legend:${R}  ${GRN}✅ Smooth${R}  ${YEL}⚠️ Tight${R}  ${RED}❌ Too large${R}"
     echo
     echo -e "  ${DIM}Tip: Omit the filename to auto-pick the Q4_K_M variant.${R}"
     echo -e "  ${DIM}Browse more: https://huggingface.co/models?library=gguf${R}"
