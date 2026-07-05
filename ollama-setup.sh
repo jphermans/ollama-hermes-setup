@@ -2,8 +2,9 @@
 # ═══════════════════════════════════════════════════════════════
 #  🦙 Ollama Installer with Hermes Agent Integration
 #
-#  Auto-detects hardware (CPU, RAM, GPU) and recommends the best
-#  model configuration for your machine.
+#  Cross-platform: Linux · macOS · WSL2
+#  Auto-detects hardware (CPU, RAM, GPU, platform) and recommends
+#  the best model configuration for your machine.
 #
 #  Usage:  bash ollama-setup.sh              # Interactive menu
 #          bash ollama-setup.sh [flags]       # Direct mode
@@ -52,51 +53,162 @@ banner() {
     echo -e "  ${BCYN} / , _/ /_/ /| / /| / <| / < ${R}"
     echo -e "  ${BCYN}/_/|_|\\____/_|/_/ |_/\\_\\|_/\\_\\\\${R}  ${DIM}Setup Script${R}"
     echo -e "  ${DIM}─────────────────────────────────────────${R}"
-    echo -e "  ${BBLU}🦙 Ollama${R} + ${BMAG}🤖 Hermes Agent${R} ${DIM}| Auto-detect${R}"
+    echo -e "  ${BBLU}🦙 Ollama${R} + ${BMAG}🤖 Hermes Agent${R} ${DIM}| Cross-platform${R}"
     echo
 }
 
 # ═══════════════════════════════════════════════════════════════
-# HARDWARE DETECTION
+# PLATFORM DETECTION
+# ═══════════════════════════════════════════════════════════════
+detect_platform() {
+    PLATFORM="unknown"
+    PLATFORM_LABEL="Unknown"
+    HAS_SYSTEMD=false
+    IS_SBC=false    # Single-board computer (Raspberry Pi, etc.)
+    SBC_MODEL=""
+
+    case "$(uname -s)" in
+        Linux)
+            # Check if running under WSL2
+            if grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then
+                PLATFORM="wsl2"
+                PLATFORM_LABEL="WSL2"
+                # WSL2 may or may not have systemd
+                if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null 2>&1; then
+                    HAS_SYSTEMD=true
+                fi
+            else
+                PLATFORM="linux"
+                PLATFORM_LABEL="Linux"
+                if command -v systemctl &>/dev/null; then
+                    HAS_SYSTEMD=true
+                fi
+            fi
+
+            # SBC detection (Raspberry Pi, Orange Pi, etc.)
+            if [[ -f /proc/device-tree/model ]]; then
+                SBC_MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)
+                if [[ -n "$SBC_MODEL" ]]; then
+                    IS_SBC=true
+                fi
+            fi
+            ;;
+        Darwin)
+            PLATFORM="macos"
+            PLATFORM_LABEL="macOS"
+            ;;
+        *)
+            PLATFORM="unknown"
+            PLATFORM_LABEL="$(uname -s)"
+            ;;
+    esac
+}
+
+# ═══════════════════════════════════════════════════════════════
+# HARDWARE DETECTION (platform-aware)
 # ═══════════════════════════════════════════════════════════════
 detect_hardware() {
-    # ── RAM ──
-    RAM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
+    # ── Architecture ──
+    ARCH=$(uname -m)
 
-    # ── Swap ──
-    SWAP_GB=$(awk '/SwapTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
-
-    # ── CPU ──
-    CPU_THREADS=$(nproc)
-    CPU_CORES=$(awk '/^cpu cores/ {print $4; exit}' /proc/cpuinfo)
-    CPU_MODEL=$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
-    [[ -z "$CPU_CORES" ]] && CPU_CORES=$CPU_THREADS
-
-    # ── Disk ──
-    AVAIL_GB=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
+    # ── Platform-specific RAM/CPU/Disk ──
+    case "$PLATFORM" in
+        linux|wsl2)
+            # RAM
+            RAM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
+            # Swap
+            SWAP_GB=$(awk '/SwapTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
+            # CPU
+            CPU_THREADS=$(nproc)
+            CPU_CORES=$(awk '/^cpu cores/ {print $4; exit}' /proc/cpuinfo)
+            CPU_MODEL=$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+            if [[ -z "$CPU_CORES" ]]; then CPU_CORES=$CPU_THREADS; fi
+            # Disk
+            AVAIL_GB=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
+            ;;
+        macos)
+            # RAM
+            RAM_GB=$(($(sysctl -n hw.memsize) / 1073741824))
+            SWAP_GB=0
+            # CPU
+            CPU_CORES=$(sysctl -n hw.physicalcpu)
+            CPU_THREADS=$(sysctl -n hw.logicalcpu)
+            CPU_MODEL=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
+            # Disk
+            AVAIL_GB=$(df -g / | awk 'NR==2 {print $4}')
+            ;;
+        *)
+            # Fallback
+            RAM_GB=8
+            SWAP_GB=0
+            CPU_CORES=2
+            CPU_THREADS=4
+            CPU_MODEL="Unknown"
+            AVAIL_GB=20
+            ;;
+    esac
 
     # ── GPU Detection ──
     HAS_GPU=false
     GPU_NAME=""
     GPU_VRAM_MB=0
-    if command -v nvidia-smi &>/dev/null; then
-        # nvidia-smi may exist but fail (no driver). Wrap safely.
-        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
-        GPU_VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || true)
-        # Validate we got actual numbers, not error text
-        if [[ -n "$GPU_NAME" && "$GPU_VRAM_MB" =~ ^[0-9]+$ && "$GPU_VRAM_MB" -gt 0 ]]; then
-            HAS_GPU=true
-        else
-            GPU_NAME=""
-            GPU_VRAM_MB=0
-        fi
-    fi
+    IS_APPLE_SILICON=false
+
+    case "$PLATFORM" in
+        linux|wsl2)
+            if command -v nvidia-smi &>/dev/null; then
+                GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)
+                GPU_VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || true)
+                if [[ -n "$GPU_NAME" && "$GPU_VRAM_MB" =~ ^[0-9]+$ && "$GPU_VRAM_MB" -gt 0 ]]; then
+                    HAS_GPU=true
+                else
+                    GPU_NAME=""
+                    GPU_VRAM_MB=0
+                fi
+            fi
+            ;;
+        macos)
+            # Apple Silicon: unified memory acts as VRAM via Metal
+            CPU_ARCH=$(uname -m)
+            if [[ "$CPU_ARCH" == "arm64" ]]; then
+                IS_APPLE_SILICON=true
+                CHIP_NAME=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
+                GPU_NAME="$CHIP_NAME (Metal)"
+                # Apple Silicon uses unified memory — a portion of RAM is available as VRAM
+                # Conservative: assume 70% of RAM available for GPU (OS needs the rest)
+                GPU_VRAM_MB=$(( RAM_GB * 1024 * 70 / 100 ))
+                HAS_GPU=true
+            fi
+            ;;
+    esac
 
     # ── Determine hardware tier ──
-    # Tier: low-end → mid-range → high-end → GPU-accelerated
-    HW_TIER="low"
-    if $HAS_GPU; then
-        if (( GPU_VRAM_MB >= 24000 )); then
+    # ARM SBCs (Raspberry Pi, etc.) get more conservative tiers
+    # because ARM cores are slower per-clock than x86/Apple Silicon
+    HW_TIER="cpu-tiny"
+
+    if $IS_SBC; then
+        # ── SBC tiers (Raspberry Pi, etc.) — conservative ──
+        if (( RAM_GB >= 16 )); then
+            HW_TIER="sbc-high"
+        elif (( RAM_GB >= 8 )); then
+            HW_TIER="sbc-mid"
+        elif (( RAM_GB >= 4 )); then
+            HW_TIER="sbc-low"
+        else
+            HW_TIER="sbc-tiny"
+        fi
+    elif $HAS_GPU; then
+        # ── GPU tiers ──
+        if $IS_APPLE_SILICON; then
+            if (( RAM_GB >= 64 )); then
+                HW_TIER="apple-silicon-large"
+            elif (( RAM_GB >= 32 )); then
+                HW_TIER="apple-silicon-mid"
+            else
+                HW_TIER="apple-silicon-small"
+            fi
+        elif (( GPU_VRAM_MB >= 24000 )); then
             HW_TIER="gpu-large"
         elif (( GPU_VRAM_MB >= 12000 )); then
             HW_TIER="gpu-mid"
@@ -115,10 +227,37 @@ detect_hardware() {
         HW_TIER="cpu-tiny"
     fi
 
-    # ── Auto-configure based on tier ──
+    # ── Auto-configure models based on tier ──
     case "$HW_TIER" in
+        apple-silicon-large)
+            # M-series with 64GB+ unified memory — large models via Metal
+            HERMES_MAIN="qwen2.5:32b"
+            HERMES_DELEGATION="qwen2.5:32b"
+            HERMES_AUX="gemma3:12b"
+            HERMES_KANBAN="qwen2.5:32b"
+            STARTER_MODELS=("qwen2.5:32b" "gemma3:12b" "nomic-embed-text")
+            MAX_LOADED=3
+            ;;
+        apple-silicon-mid)
+            # M-series with 32GB unified memory — medium-large models
+            HERMES_MAIN="gemma4:latest"
+            HERMES_DELEGATION="gemma4:latest"
+            HERMES_AUX="gemma3:12b"
+            HERMES_KANBAN="gemma4:latest"
+            STARTER_MODELS=("gemma4:latest" "gemma3:12b" "nomic-embed-text")
+            MAX_LOADED=2
+            ;;
+        apple-silicon-small)
+            # M-series with 16GB unified memory — 7B-12B models
+            HERMES_MAIN="gemma4:latest"
+            HERMES_DELEGATION="gemma4:latest"
+            HERMES_AUX="gemma3:12b"
+            HERMES_KANBAN="gemma4:latest"
+            STARTER_MODELS=("gemma4:latest" "nomic-embed-text")
+            MAX_LOADED=2
+            ;;
         gpu-large)
-            # 24GB+ VRAM — run everything locally, large models
+            # 24GB+ VRAM
             HERMES_MAIN="qwen2.5:32b"
             HERMES_DELEGATION="qwen2.5:32b"
             HERMES_AUX="gemma3:12b"
@@ -127,7 +266,7 @@ detect_hardware() {
             MAX_LOADED=3
             ;;
         gpu-mid)
-            # 12-24GB VRAM — medium-large models
+            # 12-24GB VRAM
             HERMES_MAIN="gemma4:latest"
             HERMES_DELEGATION="gemma4:latest"
             HERMES_AUX="gemma3:12b"
@@ -136,7 +275,7 @@ detect_hardware() {
             MAX_LOADED=2
             ;;
         gpu-small)
-            # 6-12GB VRAM — 7B-12B models
+            # 6-12GB VRAM
             HERMES_MAIN="gemma4:latest"
             HERMES_DELEGATION="gemma4:latest"
             HERMES_AUX="gemma3:12b"
@@ -145,7 +284,7 @@ detect_hardware() {
             MAX_LOADED=2
             ;;
         gpu-tiny)
-            # <6GB VRAM — small models
+            # <6GB VRAM
             HERMES_MAIN="llama3.1:8b"
             HERMES_DELEGATION="llama3.1:8b"
             HERMES_AUX="llama3.1:8b"
@@ -154,7 +293,7 @@ detect_hardware() {
             MAX_LOADED=1
             ;;
         cpu-high)
-            # 32GB+ RAM, CPU-only — 12B-26B models
+            # 32GB+ RAM, CPU-only x86
             HERMES_MAIN="gemma4:latest"
             HERMES_DELEGATION="gemma4:latest"
             HERMES_AUX="gemma3:12b"
@@ -163,7 +302,7 @@ detect_hardware() {
             MAX_LOADED=2
             ;;
         cpu-mid)
-            # 16-32GB RAM, CPU-only — 7B-12B models
+            # 16-32GB RAM, CPU-only x86
             HERMES_MAIN="llama3.1:8b"
             HERMES_DELEGATION="llama3.1:8b"
             HERMES_AUX="gemma3:12b"
@@ -172,7 +311,7 @@ detect_hardware() {
             MAX_LOADED=2
             ;;
         cpu-low)
-            # 8-16GB RAM, CPU-only — 3B-8B models
+            # 8-16GB RAM, CPU-only x86
             HERMES_MAIN="llama3.2:3b"
             HERMES_DELEGATION="llama3.2:3b"
             HERMES_AUX="llama3.2:3b"
@@ -181,7 +320,7 @@ detect_hardware() {
             MAX_LOADED=1
             ;;
         cpu-tiny)
-            # <8GB RAM — tiny models only
+            # <8GB RAM, CPU-only x86
             HERMES_MAIN="llama3.2:1b"
             HERMES_DELEGATION="llama3.2:1b"
             HERMES_AUX="llama3.2:1b"
@@ -189,9 +328,45 @@ detect_hardware() {
             STARTER_MODELS=("llama3.2:1b" "nomic-embed-text")
             MAX_LOADED=1
             ;;
+        sbc-high)
+            # SBC with 16GB+ RAM (rare, e.g. RPi 5 with 16GB mod)
+            HERMES_MAIN="llama3.2:3b"
+            HERMES_DELEGATION="llama3.2:3b"
+            HERMES_AUX="llama3.2:3b"
+            HERMES_KANBAN="llama3.2:3b"
+            STARTER_MODELS=("llama3.2:3b" "nomic-embed-text")
+            MAX_LOADED=1
+            ;;
+        sbc-mid)
+            # SBC with 8GB RAM (RPi 5 8GB)
+            HERMES_MAIN="llama3.2:3b"
+            HERMES_DELEGATION="llama3.2:3b"
+            HERMES_AUX="llama3.2:1b"
+            HERMES_KANBAN="llama3.2:3b"
+            STARTER_MODELS=("llama3.2:3b" "nomic-embed-text")
+            MAX_LOADED=1
+            ;;
+        sbc-low)
+            # SBC with 4-8GB RAM
+            HERMES_MAIN="llama3.2:1b"
+            HERMES_DELEGATION="llama3.2:1b"
+            HERMES_AUX="llama3.2:1b"
+            HERMES_KANBAN="llama3.2:1b"
+            STARTER_MODELS=("llama3.2:1b" "nomic-embed-text")
+            MAX_LOADED=1
+            ;;
+        sbc-tiny)
+            # SBC with <4GB RAM
+            HERMES_MAIN="llama3.2:1b"
+            HERMES_DELEGATION="llama3.2:1b"
+            HERMES_AUX="llama3.2:1b"
+            HERMES_KANBAN="llama3.2:1b"
+            STARTER_MODELS=("llama3.2:1b")
+            MAX_LOADED=1
+            ;;
     esac
 
-    # Threads = physical cores (or logical cores on single-core)
+    # Threads = physical cores
     DETECTED_THREADS=$CPU_CORES
     if [[ "$DETECTED_THREADS" -lt 1 ]]; then
         DETECTED_THREADS=$CPU_THREADS
@@ -199,12 +374,12 @@ detect_hardware() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# DEFAULTS (overridden by detect_hardware)
+# DEFAULTS
 # ═══════════════════════════════════════════════════════════════
 OLLAMA_HOST="127.0.0.1"
 OLLAMA_PORT=11434
 OLLAMA_KEY="ollama"
-THREADS=0  # Will be set by detection
+THREADS=0
 PARALLEL=1
 MAX_LOADED=2
 
@@ -214,11 +389,11 @@ HERMES_AUX=""
 HERMES_KANBAN=""
 STARTER_MODELS=()
 
-# Auxiliary slots
 AUX_CORE_SLOTS=(vision web_extract compression title_generation)
 AUX_EXTENDED_SLOTS=(approval triage_specifier session_search curator profile_describer)
 
-# Run hardware detection early
+# Run detection
+detect_platform
 detect_hardware
 THREADS=$DETECTED_THREADS
 OLLAMA_BASE="http://${OLLAMA_HOST}:${OLLAMA_PORT}/v1"
@@ -229,6 +404,10 @@ NO_MODELS=false
 MODELS_ONLY=false
 UNINSTALL=false
 HERMES_MODE=""
+HF_MODEL=""
+HF_LIST=false
+MCP_SCAN=false
+SKILLS_CHECK=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -241,8 +420,13 @@ for arg in "$@"; do
         --hermes-hybrid)   HERMES_MODE="hybrid" ;;
         --hermes-aux)      HERMES_MODE="aux" ;;
         --hermes-reset)    HERMES_MODE="reset" ;;
+        --hf-model)        HF_MODEL="${2:-}"; shift || true ;;
+        --hf-list)         HF_LIST=true ;;
+        --mcp-scan)        MCP_SCAN=true ;;
+        --skills-check)    SKILLS_CHECK=true ;;
         --help|-h)
             echo -e "\n  ${B}🦙 Ollama + 🤖 Hermes Agent Setup Script${R}\n"
+            echo -e "  ${B}Supported platforms:${R} ${CYN}Linux · macOS · WSL2${R} ${DIM}(x86_64 + arm64)${R}\n"
             echo -e "  ${B}Usage:${R}"
             echo -e "    ${CYN}bash ollama-setup.sh${R}                 ${DIM}# Interactive menu${R}"
             echo -e "    ${CYN}bash ollama-setup.sh [flags]${R}        ${DIM}# Direct mode${R}\n"
@@ -254,6 +438,10 @@ for arg in "$@"; do
             echo -e "    ${CYN}--hermes-reset${R}    ${DIM}Reset Hermes to cloud/auto defaults${R}"
             echo -e "    ${CYN}--models-only${R}     ${DIM}Skip install, only pull models${R}"
             echo -e "    ${CYN}--no-models${R}       ${DIM}Skip model downloads${R}"
+            echo -e "    ${CYN}--hf-model${R} <id>   ${DIM}Import a GGUF model from HuggingFace${R}"
+            echo -e "    ${CYN}--hf-list${R}         ${DIM}Show popular HuggingFace GGUF models${R}"
+            echo -e "    ${CYN}--mcp-scan${R}        ${DIM}Scan Hermes MCP servers for Ollama-compatible tools${R}"
+            echo -e "    ${CYN}--skills-check${R}    ${DIM}Check for Hermes skills that use Ollama${R}"
             echo -e "    ${CYN}--dry-run${R}         ${DIM}Preview without changes${R}"
             echo -e "    ${CYN}--uninstall${R}       ${DIM}Remove Ollama completely${R}"
             echo -e "    ${CYN}--help${R}            ${DIM}Show this help${R}\n"
@@ -270,18 +458,18 @@ done
 banner
 
 # ═══════════════════════════════════════════════════════════════
-# INTERACTIVE MAIN MENU (when no arguments are passed)
+# INTERACTIVE MAIN MENU
 # ═══════════════════════════════════════════════════════════════
 if [[ $# -eq 0 ]]; then
     echo -e "  ${B}Welcome! What would you like to do?${R}"
     echo
     echo -e "  ${BG_GRN}${WHT}${B} 1 ${R} ${BGRN}🚀 Full Install + Hermes Hybrid${R} ${BGRN}⭐${R}"
-    echo -e "     ${DIM}Install Ollama + tune systemd + download models${R}"
+    echo -e "     ${DIM}Install Ollama + tune performance + download models${R}"
     echo -e "     ${DIM}Configure Hermes with the recommended hybrid preset${R}"
     echo -e "     ${DIM}(cloud for chat, local for background tasks)${R}"
     echo
     echo -e "  ${BG_BLU}${WHT}${B} 2 ${R} ${BBLU}⚙️  Full Install Only${R}"
-    echo -e "     ${DIM}Install Ollama + tune systemd + download starter models${R}"
+    echo -e "     ${DIM}Install Ollama + tune performance + download starter models${R}"
     echo -e "     ${DIM}No Hermes configuration (standalone Ollama)${R}"
     echo
     echo -e "  ${BG_MAG}${WHT}${B} 3 ${R} ${BMAG}🤖 Configure Hermes Only${R}"
@@ -303,26 +491,12 @@ if [[ $# -eq 0 ]]; then
     read -rp "$(echo -e "  ${BYEL}▶ Select an option [1-6/q]: ${R}")" menu_choice
 
     case "$menu_choice" in
-        1)
-            HERMES_MODE="hybrid"
-            ;;
-        2)
-            # Full install, no Hermes — defaults are fine
-            ;;
-        3)
-            MODELS_ONLY=true
-            HERMES_MODE="ask"
-            ;;
-        4)
-            MODELS_ONLY=true
-            ;;
-        5)
-            DRY_RUN=true
-            HERMES_MODE="hybrid"
-            ;;
-        6)
-            UNINSTALL=true
-            ;;
+        1) HERMES_MODE="hybrid" ;;
+        2) ;;
+        3) MODELS_ONLY=true; HERMES_MODE="ask" ;;
+        4) MODELS_ONLY=true ;;
+        5) DRY_RUN=true; HERMES_MODE="hybrid" ;;
+        6) UNINSTALL=true ;;
         q|Q|quit|exit)
             echo -e "  ${DIM}Bye! 👋${R}"
             exit 0
@@ -335,6 +509,288 @@ if [[ $# -eq 0 ]]; then
     esac
     echo
 fi
+
+# ═══════════════════════════════════════════════════════════════
+# HUGGINGFACE MODEL IMPORT
+# ═══════════════════════════════════════════════════════════════
+show_hf_models() {
+    header "🤗 Popular HuggingFace GGUF Models"
+    echo -e "  ${B}Format:${R} ${CYN}--hf-model org/repo:filename${R} ${DIM}or${R} ${CYN}--hf-model org/repo${R}"
+    echo
+    echo -e "  ${B}💬 General Purpose${R}"
+    echo -e "    ${CYN}bartowski/Qwen2.5-7B-Instruct-GGUF${R}        ${DIM}Q4_K_M ~4.7 GB${R}"
+    echo -e "    ${CYN}bartowski/Llama-3.1-8B-Instruct-GGUF${R}      ${DIM}Q4_K_M ~4.9 GB${R}"
+    echo -e "    ${CYN}bartowski/gemma-2-9b-it-GGUF${R}              ${DIM}Q4_K_M ~5.5 GB${R}"
+    echo
+    echo -e "  ${B}💻 Coding${R}"
+    echo -e "    ${CYN}bartowski/Qwen2.5-Coder-7B-Instruct-GGUF${R}  ${DIM}Q4_K_M ~4.7 GB${R}"
+    echo -e "    ${CYN}bartowski/Qwen2.5-Coder-14B-Instruct-GGUF${R} ${DIM}Q4_K_M ~9.0 GB${R}"
+    echo
+    echo -e "  ${B}🧠 Reasoning${R}"
+    echo -e "    ${CYN}bartowski/deepseek-r1-Distill-Qwen-7B-GGUF${R} ${DIM}Q4_K_M ~4.7 GB${R}"
+    echo -e "    ${CYN}bartowski/deepseek-r1-Distill-Qwen-14B-GGUF${R}${DIM}Q4_K_M ~9.0 GB${R}"
+    echo
+    echo -e "  ${B}🔤 Embeddings${R}"
+    echo -e "    ${CYN}nomic-ai/nomic-embed-text-v1-GGUF${R}          ${DIM}~137 MB${R}"
+    echo -e "    ${CYN}mixedbread-ai/mxbai-embed-large-v1-GGUF${R}    ${DIM}~670 MB${R}"
+    echo
+    echo -e "  ${DIM}Tip: Omit the filename to auto-pick the Q4_K_M variant.${R}"
+    echo -e "  ${DIM}Browse more: https://huggingface.co/models?library=gguf${R}"
+    echo
+    exit 0
+}
+
+import_hf_model() {
+    local hf_id="$1"
+    header "🤗 Import from HuggingFace"
+
+    # Parse org/repo:filename or org/repo
+    local repo=""
+    local filename=""
+
+    if [[ "$hf_id" == *":"* ]]; then
+        repo="${hf_id%%:*}"
+        filename="${hf_id#*:}"
+    else
+        repo="$hf_id"
+    fi
+
+    info "📦 Repo: ${B}$repo${R}"
+    [[ -n "$filename" ]] && info "📄 File: ${B}$filename${R}"
+
+    # Check if huggingface-cli is available (preferred)
+    if command -v huggingface-cli &>/dev/null; then
+        info "Using huggingface-cli to download..."
+
+        # If no filename specified, try to find Q4_K_M
+        if [[ -z "$filename" ]]; then
+            step "🔍 Finding best quantization (Q4_K_M)..."
+            # List files and pick Q4_K_M
+            local all_files
+            all_files=$(huggingface-cli repo files "$repo" 2>/dev/null || true)
+            filename=$(echo "$all_files" | grep -i "Q4_K_M" | head -1 || true)
+            if [[ -z "$filename" ]]; then
+                # Fallback: pick first .gguf
+                filename=$(echo "$all_files" | grep -i '\.gguf$' | head -1 || true)
+            fi
+            if [[ -z "$filename" ]]; then
+                err "No GGUF file found in $repo. Specify explicitly: --hf-model $repo:filename.gguf"
+                exit 1
+            fi
+            info "📄 Auto-selected: ${B}$filename${R}"
+        fi
+
+        # Download via huggingface-cli
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
+        step "⬇️  Downloading..."
+        if $DRY_RUN; then
+            echo -e "    ${DIM}▫ [dry-run]${R} huggingface-cli download $repo $filename --local-dir $tmp_dir"
+        else
+            huggingface-cli download "$repo" "$filename" --local-dir "$tmp_dir" --local-dir-use-symlinks False
+        fi
+
+        # Register with Ollama
+        local model_name
+        model_name=$(basename "$repo" | tr '[:upper:]' '[:lower:]')
+        step "🦙 Registering with Ollama as ${B}$model_name${R}..."
+        if ! $DRY_RUN; then
+            # Create a Modelfile and import
+            cat > "$tmp_dir/Modelfile" <<MEOF
+FROM ./$filename
+MEOF
+            (cd "$tmp_dir" && ollama create "$model_name" -f Modelfile)
+            ok "✓ Model ${B}$model_name${R} imported from HuggingFace"
+            rm -rf "$tmp_dir"
+        fi
+    else
+        # No huggingface-cli — use curl directly
+        warn "huggingface-cli not found. Using direct download."
+        info "Install for better experience: ${CYN}pip install huggingface-hub${R}"
+
+        if [[ -z "$filename" ]]; then
+            # Try common Q4_K_M pattern
+            filename="${repo##*/}-Q4_K_M.gguf"
+            warn "Guessing filename: $filename"
+            warn "If wrong, specify: --hf-model $repo:exact-file.gguf"
+        fi
+
+        local download_url="https://huggingface.co/$repo/resolve/main/$filename"
+        local tmp_file="/tmp/$(basename "$filename")"
+        local model_name
+        model_name=$(basename "$repo" | tr '[:upper:]' '[:lower:]')
+
+        step "⬇️  Downloading $filename..."
+        if $DRY_RUN; then
+            echo -e "    ${DIM}▫ [dry-run]${R} curl -L $download_url -o $tmp_file"
+        else
+            curl -L "$download_url" -o "$tmp_file"
+        fi
+
+        step "🦙 Registering with Ollama as ${B}$model_name${R}..."
+        if ! $DRY_RUN; then
+            cat > "/tmp/Modelfile-$model_name" <<MEOF
+FROM $tmp_file
+MEOF
+            ollama create "$model_name" -f "/tmp/Modelfile-$model_name"
+            ok "✓ Model ${B}$model_name${R} imported"
+            rm -f "$tmp_file" "/tmp/Modelfile-$model_name"
+        fi
+    fi
+
+    echo
+    info "Run with: ${CYN}ollama run ${model_name}${R}"
+    exit 0
+}
+
+# ═══════════════════════════════════════════════════════════════
+# MCP SERVER SCAN
+# ═══════════════════════════════════════════════════════════════
+scan_mcp_servers() {
+    header "🔌 MCP Server Scan"
+    info "Scanning Hermes MCP config for Ollama-compatible tools...\n"
+
+    local config_file="$HOME/.hermes/config.yaml"
+
+    if [[ ! -f "$config_file" ]]; then
+        warn "No Hermes config found."
+        exit 0
+    fi
+
+    # Extract MCP server names
+    local servers=()
+    while IFS= read -r line; do
+        local name
+        name=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/:.*//')
+        [[ -n "$name" ]] && servers+=("$name")
+    done < <(grep -A1 "^mcp_servers:" "$config_file" | grep -E "^\s+\w+:" | head -20 || true)
+
+    # Also try Python YAML parse for reliability
+    if [[ ${#servers[@]} -eq 0 ]]; then
+        servers=$(python3 -c "
+import yaml
+try:
+    c = yaml.safe_load(open('$config_file'))
+    mcps = c.get('mcp_servers', {})
+    for name in mcps:
+        print(name)
+except:
+    pass
+" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$servers" ]]; then
+        warn "No MCP servers found in config."
+        exit 0
+    fi
+
+    info "Found ${B}$(echo "$servers" | wc -w)${R} MCP server(s):"
+    echo
+
+    local ollama_related=0
+    for srv in $servers; do
+        # Check if this server might benefit from local Ollama
+        local lower_srv
+        lower_srv=$(echo "$srv" | tr '[:upper:]' '[:lower:]')
+        local relevant=""
+
+        case "$lower_srv" in
+            *code*|*runner*)     relevant="💻 Can use Ollama for code execution LLM" ;;
+            *fetch*|*extract*)   relevant="🌐 Can use Ollama for web extraction" ;;
+            *search*)            relevant="🔍 Can use Ollama embeddings for search" ;;
+            *git*|*github*)      relevant="📦 May use Ollama for commit messages" ;;
+            *filesystem*)        relevant="📂 May use Ollama for file analysis" ;;
+        esac
+
+        if [[ -n "$relevant" ]]; then
+            echo -e "    ${GRN}●${R} ${B}$srv${R} ${DIM}$relevant${R}"
+            (( ollama_related++ )) || true
+        else
+            echo -e "    ${DIM}○ $srv${R}"
+        fi
+    done
+
+    echo
+    if (( ollama_related > 0 )); then
+        info "💡 ${B}${ollama_related}${R} MCP server(s) can benefit from local Ollama."
+        info "   They will automatically use Ollama if configured in Hermes auxiliary slots."
+    else
+        info "No MCP servers directly benefit from Ollama, but embeddings (nomic-embed-text)"
+        info "can still accelerate semantic search features."
+    fi
+    echo
+    exit 0
+}
+
+# ═══════════════════════════════════════════════════════════════
+# HERMES SKILLS CHECK
+# ═══════════════════════════════════════════════════════════════
+check_skills() {
+    header "🧩 Hermes Skills Check"
+    info "Scanning for skills that work with Ollama...\n"
+
+    local skills_dir="$HOME/.hermes/skills"
+    local found=0
+
+    if [[ ! -d "$skills_dir" ]]; then
+        warn "No skills directory found at $skills_dir"
+        exit 0
+    fi
+
+    # Find skills that mention ollama
+    local ollama_skills=()
+    while IFS= read -r file; do
+        local skill_name
+        skill_name=$(basename "$(dirname "$file")")
+        ollama_skills+=("$skill_name")
+        (( found++ )) || true
+    done < <(grep -rl -i "ollama" "$skills_dir"/*/SKILL.md 2>/dev/null || true)
+
+    if (( found > 0 )); then
+        info "Found ${B}${found}${R} skill(s) referencing Ollama:"
+        echo
+        for skill in "${ollama_skills[@]}"; do
+            echo -e "    ${GRN}●${R} ${B}$skill${R}"
+        done
+        echo
+        info "These skills can leverage your local Ollama installation."
+    else
+        info "No skills currently reference Ollama."
+    fi
+
+    # Check for specific known skills
+    echo
+    info "Checking for key Ollama-related skills..."
+    local key_skills=(
+        "hermes-local-models:Configure Hermes to use local models via Ollama"
+        "serving-llms-vllm:Serve LLMs (alternative to Ollama)"
+        "llama-cpp:Run GGUF models directly (Ollama alternative)"
+        "ocr-and-documents:Extract text from PDFs (can use Ollama vision)"
+        "huggingface-hub:Download models from HuggingFace"
+    )
+
+    for entry in "${key_skills[@]}"; do
+        local skill_name="${entry%%:*}"
+        local desc="${entry#*:}"
+        if [[ -f "$skills_dir"/*/SKILL.md ]] && grep -rl -i "$skill_name" "$skills_dir"/*/SKILL.md &>/dev/null 2>&1; then
+            echo -e "    ${GRN}✓${R} ${B}$skill_name${R} ${DIM}— installed${R}"
+        else
+            echo -e "    ${DIM}○ $skill_name${R} ${DIM}— $desc${R}"
+        fi
+    done
+
+    echo
+    info "💡 Skills are automatically discovered by Hermes Agent."
+    info "   Install with: ${CYN}hermes skills install <name>${R}"
+    echo
+    exit 0
+}
+
+# Handle standalone flags (--hf-list, --hf-model, --mcp-scan, --skills-check)
+$HF_LIST && show_hf_models
+[[ -n "$HF_MODEL" ]] && import_hf_model "$HF_MODEL"
+$MCP_SCAN && scan_mcp_servers
+$SKILLS_CHECK && check_skills
 
 # Dry-run wrapper
 run() {
@@ -355,19 +811,41 @@ if $UNINSTALL; then
     [[ "$confirm" =~ ^[Yy]$ ]] || { echo -e "  ${DIM}Aborted.${R}"; exit 0; }
 
     step "🛑 Stopping service..."
-    run "sudo systemctl stop ollama 2>/dev/null || true"
-    run "sudo systemctl disable ollama 2>/dev/null || true"
 
-    step "📄 Removing service file..."
-    run "sudo rm -f /etc/systemd/system/ollama.service"
-    run "sudo systemctl daemon-reload"
+    case "$PLATFORM" in
+        linux|wsl2)
+            if $HAS_SYSTEMD; then
+                run "sudo systemctl stop ollama 2>/dev/null || true"
+                run "sudo systemctl disable ollama 2>/dev/null || true"
+                run "sudo rm -f /etc/systemd/system/ollama.service"
+                run "sudo rm -rf /etc/systemd/system/ollama.service.d"
+                run "sudo systemctl daemon-reload"
+            else
+                run "pkill -f 'ollama serve' 2>/dev/null || true"
+            fi
+            ;;
+        macos)
+            run "launchctl unload ~/Library/LaunchAgents/com.ollama.plist 2>/dev/null || true"
+            run "rm -f ~/Library/LaunchAgents/com.ollama.plist"
+            # Also remove brew service if installed via brew
+            run "brew services stop ollama 2>/dev/null || true"
+            ;;
+    esac
 
     step "📦 Removing binary..."
-    run "sudo rm -f /usr/local/bin/ollama"
-
-    step "🗂️ Removing user and data..."
-    run "sudo rm -rf /usr/share/ollama"
-    run "sudo userdel ollama 2>/dev/null || true"
+    case "$PLATFORM" in
+        macos)
+            run "rm -f /usr/local/bin/ollama"
+            run "rm -rf /Applications/Ollama.app 2>/dev/null || true"
+            run "rm -rf ~/.ollama"
+            run "brew uninstall ollama 2>/dev/null || true"
+            ;;
+        *)
+            run "sudo rm -f /usr/local/bin/ollama"
+            run "sudo rm -rf /usr/share/ollama"
+            run "sudo userdel ollama 2>/dev/null || true"
+            ;;
+    esac
 
     echo
     ok "${BGRN}🦙 Ollama has been removed.${R}"
@@ -380,74 +858,112 @@ fi
 if ! $MODELS_ONLY; then
     header "🔍 Hardware Detection & Pre-flight Checks"
 
-    # Display detected hardware with a nice summary card
-    echo -e "    ${CYN}┌──────────────────────────────────────────────┐${R}"
-    echo -e "    ${CYN}│${R}  ${B}🧠 DETECTED HARDWARE${R}                          ${CYN}│${R}"
-    echo -e "    ${CYN}├──────────────────────────────────────────────┤${R}"
+    # Get OS display name
+    case "$PLATFORM" in
+        linux|wsl2)
+            if [[ -f /etc/os-release ]]; then
+                source /etc/os-release
+                OS_DISPLAY="${PRETTY_NAME:-Linux}"
+            else
+                OS_DISPLAY="Linux"
+            fi
+            if $IS_SBC; then
+                OS_DISPLAY="${SBC_MODEL}"
+            fi
+            [[ "$PLATFORM" == "wsl2" ]] && OS_DISPLAY="WSL2 (${OS_DISPLAY})"
+            ;;
+        macos)
+            OS_DISPLAY="macOS $(sw_vers -productVersion 2>/dev/null || echo '')"
+            ;;
+        *)
+            OS_DISPLAY="$PLATFORM_LABEL"
+            ;;
+    esac
 
-    # OS
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        printf "    ${CYN}│${R}  🖥️  %-12s ${B}%-28s${R} ${CYN}│${R}\n" "OS" "$PRETTY_NAME"
-    else
-        err "Cannot detect OS. Aborting."
-        exit 1
-    fi
+    # Display hardware card
+    echo -e "    ${CYN}┌──────────────────────────────────────────────────┐${R}"
+    echo -e "    ${CYN}│${R}  ${B}🧠 DETECTED HARDWARE${R}                              ${CYN}│${R}"
+    echo -e "    ${CYN}├──────────────────────────────────────────────────┤${R}"
 
-    # Architecture
-    ARCH=$(uname -m)
-    printf "    ${CYN}│${R}  🏗️  %-12s ${B}%-28s${R} ${CYN}│${R}\n" "Arch" "$ARCH"
+    printf "    ${CYN}│${R}  🖥️  %-13s ${B}%-30s${R} ${CYN}│${R}\n" "Platform" "$PLATFORM_LABEL"
+    printf "    ${CYN}│${R}  🏗️  %-13s ${B}%-30s${R} ${CYN}│${R}\n" "OS" "${OS_DISPLAY:0:30}"
+    printf "    ${CYN}│${R}  🔩 %-13s ${B}%-30s${R} ${CYN}│${R}\n" "Arch" "$ARCH"
 
     # CPU
     CPU_DISPLAY="${CPU_CORES}c/${CPU_THREADS}t"
-    printf "    ${CYN}│${R}  ⚡ %-12s ${B}%-28s${R} ${CYN}│${R}\n" "CPU" "$CPU_DISPLAY"
-    printf "    ${CYN}│${R}  ${DIM}%-15s %-28s${R} ${CYN}│${R}\n" "" "${CPU_MODEL:0:28}"
+    printf "    ${CYN}│${R}  ⚡ %-13s ${B}%-30s${R} ${CYN}│${R}\n" "CPU" "$CPU_DISPLAY"
+    printf "    ${CYN}│${R}  ${DIM}%-17s %-30s${R} ${CYN}│${R}\n" "" "${CPU_MODEL:0:30}"
 
-    # RAM with color
+    # RAM
     RAM_COLOR="$GRN"
     (( RAM_GB < 16 )) && RAM_COLOR="$YEL"
     (( RAM_GB < 8 ))  && RAM_COLOR="$RED"
-    printf "    ${CYN}│${R}  💾 %-12s ${RAM_COLOR}${B}%-28s${R} ${CYN}│${R}\n" "RAM" "${RAM_GB} GB"
-    [[ "$SWAP_GB" -gt 0 ]] && printf "    ${CYN}│${R}  ${DIM}%-15s %-28s${R} ${CYN}│${R}\n" "" "+ ${SWAP_GB} GB swap"
+    printf "    ${CYN}│${R}  💾 %-13s ${RAM_COLOR}${B}%-30s${R} ${CYN}│${R}\n" "RAM" "${RAM_GB} GB"
+    [[ "$SWAP_GB" -gt 0 ]] && printf "    ${CYN}│${R}  ${DIM}%-17s %-30s${R} ${CYN}│${R}\n" "" "+ ${SWAP_GB} GB swap"
 
-    # Disk with color
+    # Disk
     DISK_COLOR="$GRN"
     (( AVAIL_GB < 50 )) && DISK_COLOR="$YEL"
     (( AVAIL_GB < 20 )) && DISK_COLOR="$RED"
-    printf "    ${CYN}│${R}  💿 %-12s ${DISK_COLOR}${B}%-28s${R} ${CYN}│${R}\n" "Disk" "${AVAIL_GB} GB free"
+    printf "    ${CYN}│${R}  💿 %-13s ${DISK_COLOR}${B}%-30s${R} ${CYN}│${R}\n" "Disk" "${AVAIL_GB} GB free"
 
     # GPU
     if $HAS_GPU; then
-        GPU_VRAM_GB=$(awk "BEGIN {printf \"%.0f\", ${GPU_VRAM_MB}/1024}")
-        printf "    ${CYN}│${R}  🎮 %-12s ${B}%-28s${R} ${CYN}│${R}\n" "GPU" "${GPU_NAME:0:28}"
-        printf "    ${CYN}│${R}  ${DIM}%-15s %-28s${R} ${CYN}│${R}\n" "" "${GPU_VRAM_GB} GB VRAM"
+        if $IS_APPLE_SILICON; then
+            printf "    ${CYN}│${R}  🎮 %-13s ${B}%-30s${R} ${CYN}│${R}\n" "GPU" "${GPU_NAME:0:30}"
+            printf "    ${CYN}│${R}  ${DIM}%-17s %-30s${R} ${CYN}│${R}\n" "" "Metal (unified memory)"
+        else
+            GPU_VRAM_GB=$(awk "BEGIN {printf \"%.0f\", ${GPU_VRAM_MB}/1024}")
+            printf "    ${CYN}│${R}  🎮 %-13s ${B}%-30s${R} ${CYN}│${R}\n" "GPU" "${GPU_NAME:0:30}"
+            printf "    ${CYN}│${R}  ${DIM}%-17s %-30s${R} ${CYN}│${R}\n" "" "${GPU_VRAM_GB} GB VRAM"
+        fi
     else
-        printf "    ${CYN}│${R}  🎮 %-12s ${DIM}%-28s${R} ${CYN}│${R}\n" "GPU" "None (CPU-only)"
+        printf "    ${CYN}│${R}  🎮 %-13s ${DIM}%-30s${R} ${CYN}│${R}\n" "GPU" "None (CPU-only)"
+    fi
+
+    # Service manager
+    if $HAS_SYSTEMD; then
+        printf "    ${CYN}│${R}  🔧 %-13s ${B}%-30s${R} ${CYN}│${R}\n" "Service" "systemd"
+    elif [[ "$PLATFORM" == "macos" ]]; then
+        printf "    ${CYN}│${R}  🔧 %-13s ${B}%-30s${R} ${CYN}│${R}\n" "Service" "launchd / brew"
+    else
+        printf "    ${CYN}│${R}  🔧 %-13s ${BYEL}%-30s${R} ${CYN}│${R}\n" "Service" "manual (no systemd)"
     fi
 
     # Hardware tier
     TIER_LABEL=""
     TIER_COLOR="$GRN"
     case "$HW_TIER" in
-        gpu-large)   TIER_LABEL="🟢 GPU Large (24GB+)"; TIER_COLOR="$BGRN" ;;
-        gpu-mid)     TIER_LABEL="🟢 GPU Mid (12-24GB)"; TIER_COLOR="$BGRN" ;;
-        gpu-small)   TIER_LABEL="🟡 GPU Small (6-12GB)"; TIER_COLOR="$BYEL" ;;
-        gpu-tiny)    TIER_LABEL="🟠 GPU Tiny (<6GB)"; TIER_COLOR="$YEL" ;;
-        cpu-high)    TIER_LABEL="🔵 CPU High (32GB+ RAM)"; TIER_COLOR="$BCYN" ;;
-        cpu-mid)     TIER_LABEL="🟡 CPU Mid (16-32GB RAM)"; TIER_COLOR="$BYEL" ;;
-        cpu-low)     TIER_LABEL="🟠 CPU Low (8-16GB RAM)"; TIER_COLOR="$YEL" ;;
-        cpu-tiny)    TIER_LABEL="🔴 CPU Tiny (<8GB RAM)"; TIER_COLOR="$RED" ;;
+        apple-silicon-large)  TIER_LABEL="🍏 Apple Silicon Large (64GB+)"; TIER_COLOR="$BGRN" ;;
+        apple-silicon-mid)    TIER_LABEL="🍏 Apple Silicon Mid (32GB)"; TIER_COLOR="$BGRN" ;;
+        apple-silicon-small)  TIER_LABEL="🍏 Apple Silicon Small (16GB)"; TIER_COLOR="$BYEL" ;;
+        gpu-large)            TIER_LABEL="🟢 GPU Large (24GB+ VRAM)"; TIER_COLOR="$BGRN" ;;
+        gpu-mid)              TIER_LABEL="🟢 GPU Mid (12-24GB VRAM)"; TIER_COLOR="$BGRN" ;;
+        gpu-small)            TIER_LABEL="🟡 GPU Small (6-12GB VRAM)"; TIER_COLOR="$BYEL" ;;
+        gpu-tiny)             TIER_LABEL="🟠 GPU Tiny (<6GB VRAM)"; TIER_COLOR="$YEL" ;;
+        cpu-high)             TIER_LABEL="🔵 CPU High (32GB+ RAM)"; TIER_COLOR="$BCYN" ;;
+        cpu-mid)              TIER_LABEL="🟡 CPU Mid (16-32GB RAM)"; TIER_COLOR="$BYEL" ;;
+        cpu-low)              TIER_LABEL="🟠 CPU Low (8-16GB RAM)"; TIER_COLOR="$YEL" ;;
+        cpu-tiny)             TIER_LABEL="🔴 CPU Tiny (<8GB RAM)"; TIER_COLOR="$RED" ;;
+        sbc-high)             TIER_LABEL="🍓 SBC High (16GB+ RAM)"; TIER_COLOR="$BYEL" ;;
+        sbc-mid)              TIER_LABEL="🍓 SBC Mid (8GB RAM)"; TIER_COLOR="$YEL" ;;
+        sbc-low)              TIER_LABEL="🟠 SBC Low (4-8GB RAM)"; TIER_COLOR="$YEL" ;;
+        sbc-tiny)             TIER_LABEL="🔴 SBC Tiny (<4GB RAM)"; TIER_COLOR="$RED" ;;
     esac
-    echo -e "    ${CYN}├──────────────────────────────────────────────┤${R}"
-    printf "    ${CYN}│${R}  📊 %-12s ${TIER_COLOR}${B}%-28s${R} ${CYN}│${R}\n" "Tier" "$TIER_LABEL"
-    echo -e "    ${CYN}└──────────────────────────────────────────────┘${R}"
+    echo -e "    ${CYN}├──────────────────────────────────────────────────┤${R}"
+    printf "    ${CYN}│${R}  📊 %-13s ${TIER_COLOR}${B}%-30s${R} ${CYN}│${R}\n" "Tier" "$TIER_LABEL"
+    echo -e "    ${CYN}└──────────────────────────────────────────────────┘${R}"
     echo
 
     # Warnings
-    if [[ "$ARCH" != "x86_64" ]]; then
-        warn "Expected x86_64. Your arch may not have prebuilt binaries."
+    if [[ "$PLATFORM" == "wsl2" ]] && ! $HAS_SYSTEMD; then
+        warn "WSL2 without systemd detected. Ollama will need to be started manually."
+        info "To enable systemd in WSL2: add 'systemd=true' to /etc/wsl.conf under [boot]"
     fi
-    if ! $HAS_GPU && (( RAM_GB < 16 )); then
+    if $IS_SBC && (( RAM_GB < 8 )); then
+        warn "SBC with limited RAM — only 1B models will be practical."
+    fi
+    if ! $HAS_GPU && (( RAM_GB < 8 )); then
         warn "Limited RAM with no GPU — only small models will be practical."
     fi
     if (( AVAIL_GB < 20 )); then
@@ -460,17 +976,55 @@ if ! $MODELS_ONLY; then
     echo -e "       ${DIM}Aux:${R}  ${B}${HERMES_AUX}${R}"
     echo
 
-    # Check for existing installation
+    # ── Check Ollama installation status ──
+    OLLAMA_INSTALLED=false
+    OLLAMA_RUNNING=false
+    OLLAMA_VERSION=""
+
     if command -v ollama &>/dev/null; then
-        EXISTING_VER=$(ollama --version 2>/dev/null || echo "unknown")
-        warn "Ollama already installed (${B}${EXISTING_VER}${R})"
+        OLLAMA_INSTALLED=true
+        OLLAMA_VERSION=$(ollama --version 2>/dev/null || echo "unknown")
+        # Check if the service is running
+        if curl -sf "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags" >/dev/null 2>&1; then
+            OLLAMA_RUNNING=true
+        fi
+    fi
+
+    if $OLLAMA_INSTALLED; then
+        echo -e "  ${B}🦙 Ollama status:${R}"
+        echo -e "     ${GRN}✓${R} Installed ${DIM}(version ${OLLAMA_VERSION})${R}"
+        if $OLLAMA_RUNNING; then
+            # Show model count
+            MODEL_COUNT=$(curl -sf "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags" 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "?")
+            echo -e "     ${GRN}✓${R} Running ${DIM}(${MODEL_COUNT} models available)${R}"
+        else
+            echo -e "     ${YEL}⚠${R} Not running"
+        fi
+        echo
+
+        if ! $OLLAMA_RUNNING; then
+            warn "Ollama installed but not running."
+            case "$PLATFORM" in
+                linux|wsl2)
+                    $HAS_SYSTEMD && info "Start with: ${CYN}sudo systemctl start ollama${R}" || info "Start with: ${CYN}ollama serve &${R}"
+                    ;;
+                macos)
+                    info "Start with: ${CYN}brew services start ollama${R}"
+                    ;;
+            esac
+        fi
+
         read -rp "$(echo -e "  ${BYEL}🔄 Reinstall/upgrade? [y/N] ${R}")" reinstall
         [[ "$reinstall" =~ ^[Yy]$ ]] || { info "Skipping install."; MODELS_ONLY=true; }
     fi
 
     # Check curl
     if ! command -v curl &>/dev/null; then
-        err "curl is required. Run: ${CYN}sudo apt install curl${R}"
+        err "curl is required."
+        case "$PLATFORM" in
+            macos) err "Install with: ${CYN}brew install curl${R}" ;;
+            *)     err "Install with: ${CYN}sudo apt install curl${R}" ;;
+        esac
         exit 1
     fi
 
@@ -484,22 +1038,40 @@ fi
 if ! $MODELS_ONLY; then
     header "📥 Installing Ollama"
 
-    step "⬇️  Downloading and running official installer..."
-    if $DRY_RUN; then
-        echo -e "    ${DIM}▫ [dry-run]${R} curl -fsSL https://ollama.com/install.sh | sh"
-    else
-        curl -fsSL https://ollama.com/install.sh | sh
-    fi
+    case "$PLATFORM" in
+        macos)
+            step "⬇️  Downloading Ollama for macOS..."
+            if $DRY_RUN; then
+                echo -e "    ${DIM}▫ [dry-run]${R} curl -fsSL https://ollama.com/install.sh | sh"
+            else
+                # On macOS the install script works, but brew is also an option
+                if command -v brew &>/dev/null; then
+                    info "Homebrew detected — using brew install..."
+                    brew install ollama 2>/dev/null || curl -fsSL https://ollama.com/install.sh | sh
+                else
+                    curl -fsSL https://ollama.com/install.sh | sh
+                fi
+            fi
+            ;;
+        *)
+            step "⬇️  Downloading and running official installer..."
+            if $DRY_RUN; then
+                echo -e "    ${DIM}▫ [dry-run]${R} curl -fsSL https://ollama.com/install.sh | sh"
+            else
+                curl -fsSL https://ollama.com/install.sh | sh
+            fi
+            ;;
+    esac
 
     echo
     ok "${BGRN}✓ Install complete.${R}"
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# CONFIGURE SYSTEMD
+# CONFIGURE SERVICE
 # ═══════════════════════════════════════════════════════════════
 if ! $MODELS_ONLY; then
-    header "⚙️  Configuring systemd Service"
+    header "⚙️  Configuring Service"
 
     step "🎯 Applying performance tuning for your hardware..."
     echo
@@ -511,22 +1083,26 @@ if ! $MODELS_ONLY; then
     echo -e "    ${CYN}│${R}  ${B}OLLAMA_KEEP_ALIVE${R}      = ${GRN}5m${R}                 ${CYN}│${R}"
     echo -e "    ${CYN}│${R}  ${B}OLLAMA_MAX_LOADED${R}      = ${GRN}${MAX_LOADED}${R}                ${CYN}│${R}"
     if $HAS_GPU; then
-    echo -e "    ${CYN}│${R}  ${B}GPU${R}                    = ${GRN}enabled${R}              ${CYN}│${R}"
+        echo -e "    ${CYN}│${R}  ${B}GPU${R}                    = ${GRN}enabled${R}              ${CYN}│${R}"
     else
-    echo -e "    ${CYN}│${R}  ${B}GPU${R}                    = ${DIM}disabled (CPU-only)${R}     ${CYN}│${R}"
+        echo -e "    ${CYN}│${R}  ${B}GPU${R}                    = ${DIM}disabled (CPU-only)${R}     ${CYN}│${R}"
     fi
     echo -e "    ${CYN}└──────────────────────────────────────────────────┘${R}"
     echo
 
-    OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
-    OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
+    case "$PLATFORM" in
+        linux|wsl2)
+            if $HAS_SYSTEMD; then
+                # ── systemd override ──
+                OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
+                OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
 
-    if $DRY_RUN; then
-        echo -e "    ${DIM}▫ [dry-run]${R} sudo mkdir -p $OVERRIDE_DIR"
-        echo -e "    ${DIM}▫ [dry-run]${R} write $OVERRIDE_FILE"
-    else
-        sudo mkdir -p "$OVERRIDE_DIR"
-        sudo tee "$OVERRIDE_FILE" > /dev/null <<EOF
+                if $DRY_RUN; then
+                    echo -e "    ${DIM}▫ [dry-run]${R} sudo mkdir -p $OVERRIDE_DIR"
+                    echo -e "    ${DIM}▫ [dry-run]${R} write $OVERRIDE_FILE"
+                else
+                    sudo mkdir -p "$OVERRIDE_DIR"
+                    sudo tee "$OVERRIDE_FILE" > /dev/null <<EOF
 [Service]
 Environment="OLLAMA_NUM_THREAD=${THREADS}"
 Environment="OLLAMA_NUM_PARALLEL=${PARALLEL}"
@@ -534,14 +1110,57 @@ Environment="OLLAMA_HOST=${OLLAMA_HOST}:${OLLAMA_PORT}"
 Environment="OLLAMA_KEEP_ALIVE=5m"
 Environment="OLLAMA_MAX_LOADED_MODELS=${MAX_LOADED}"
 EOF
-    fi
+                fi
 
-    step "🔄 Reloading daemon and restarting service..."
-    run "sudo systemctl daemon-reload"
-    run "sudo systemctl enable ollama"
-    run "sudo systemctl restart ollama"
+                step "🔄 Reloading daemon and restarting service..."
+                run "sudo systemctl daemon-reload"
+                run "sudo systemctl enable ollama"
+                run "sudo systemctl restart ollama"
+            else
+                # ── No systemd (WSL2 without it, or unusual Linux) ──
+                warn "No systemd available. Ollama will run as a background process."
+                if ! $DRY_RUN; then
+                    info "Setting up ~/.ollama/env with performance settings..."
+                    mkdir -p ~/.ollama
+                    cat > ~/.ollama/env <<EOF
+export OLLAMA_NUM_THREAD=${THREADS}
+export OLLAMA_NUM_PARALLEL=${PARALLEL}
+export OLLAMA_HOST=${OLLAMA_HOST}:${OLLAMA_PORT}
+export OLLAMA_KEEP_ALIVE=5m
+export OLLAMA_MAX_LOADED_MODELS=${MAX_LOADED}
+EOF
+                fi
+                echo
+                info "To start Ollama:  ${CYN}source ~/.ollama/env && ollama serve &${R}"
+            fi
+            ;;
+        macos)
+            # ── macOS: write env vars to ~/.ollama/env ──
+            if ! $DRY_RUN; then
+                mkdir -p ~/.ollama
+                cat > ~/.ollama/env <<EOF
+export OLLAMA_NUM_THREAD=${THREADS}
+export OLLAMA_NUM_PARALLEL=${PARALLEL}
+export OLLAMA_HOST=${OLLAMA_HOST}:${OLLAMA_PORT}
+export OLLAMA_KEEP_ALIVE=5m"
+export OLLAMA_MAX_LOADED_MODELS=${MAX_LOADED}
+EOF
+                # If brew installed, start the service
+                if command -v brew &>/dev/null; then
+                    brew services start ollama 2>/dev/null || true
+                fi
+            else
+                echo -e "    ${DIM}▫ [dry-run]${R} write ~/.ollama/env"
+            fi
 
-    # Wait for service to be ready
+            step "🔄 Starting Ollama..."
+            if command -v brew &>/dev/null; then
+                run "brew services start ollama"
+            fi
+            ;;
+    esac
+
+    # Wait for API
     if ! $DRY_RUN; then
         info "⏳ Waiting for API to start..."
         for i in $(seq 1 10); do
@@ -551,7 +1170,7 @@ EOF
             fi
             echo -ne "    ${DIM}...${R}\r"
             sleep 1
-            [[ $i -eq 10 ]] && warn "API not responding yet — check: systemctl status ollama"
+            [[ $i -eq 10 ]] && warn "API not responding yet — try: ollama serve"
         done
     fi
 
@@ -590,7 +1209,7 @@ if ! $NO_MODELS; then
     done
     echo
 
-    info "📊 Total: ${B}${#STARTER_MODELS[@]}${R} model(s) selected for your ${TIER_COLOR}${B}${HW_TIER}${R} tier"
+    info "📊 Total: ${B}${#STARTER_MODELS[@]}${R} model(s) for ${TIER_COLOR}${B}${HW_TIER}${R} tier"
     echo
 
     if ! $DRY_RUN; then
@@ -796,11 +1415,30 @@ header "📊 Installation Summary"
 
 if ! $DRY_RUN; then
     echo -e "  ${B}🔧 Service:${R}"
-    if systemctl is-active ollama --no-pager 2>/dev/null | grep -q active; then
-        echo -e "    ${BGRN}● active (running)${R}"
-    else
-        echo -e "    ${BRED}● inactive${R}"
-    fi
+    case "$PLATFORM" in
+        linux|wsl2)
+            if $HAS_SYSTEMD; then
+                if systemctl is-active ollama --no-pager 2>/dev/null | grep -q active; then
+                    echo -e "    ${BGRN}● active (running)${R}"
+                else
+                    echo -e "    ${BRED}● inactive${R}"
+                fi
+            else
+                if pgrep -f "ollama serve" &>/dev/null; then
+                    echo -e "    ${BGRN}● running (background)${R}"
+                else
+                    echo -e "    ${BYEL}● not running — start with: ollama serve &${R}"
+                fi
+            fi
+            ;;
+        macos)
+            if curl -sf "http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/tags" >/dev/null 2>&1; then
+                echo -e "    ${BGRN}● active (running)${R}"
+            else
+                echo -e "    ${BYEL}● not running — start with: brew services start ollama${R}"
+            fi
+            ;;
+    esac
     echo
 
     echo -e "  ${B}📌 Version:${R}"
@@ -836,8 +1474,12 @@ echo
 echo -e "  ${CYN}💬 Chat${R}        ollama run ${HERMES_MAIN}"
 echo -e "  ${CYN}📋 List${R}        ollama list"
 echo -e "  ${CYN}🌐 API${R}         http://${OLLAMA_HOST}:${OLLAMA_PORT}"
+if [[ "$PLATFORM" == "macos" ]]; then
+echo -e "  ${CYN}📊 Status${R}      brew services info ollama"
+else
 echo -e "  ${CYN}📊 Status${R}      systemctl status ollama"
 echo -e "  ${CYN}📝 Logs${R}        journalctl -u ollama -f"
+fi
 echo
 if [[ -n "$HERMES_MODE" && "$HERMES_MODE" != "ask" ]]; then
 echo -e "  ${MAG}🤖 Hermes${R}      ${CYN}systemctl --user restart hermes-gateway${R}"
