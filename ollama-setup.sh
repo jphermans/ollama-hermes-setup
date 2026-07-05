@@ -860,6 +860,113 @@ run() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# HERMES DETECTION & STATUS
+# ═══════════════════════════════════════════════════════════════
+HERMES_INSTALLED=false
+HERMES_VERSION=""
+HERMES_UPDATE_AVAILABLE=false
+
+detect_hermes() {
+    HERMES_BIN=""
+    HERMES_CONFIG="$HOME/.hermes/config.yaml"
+    if command -v hermes &>/dev/null; then
+        HERMES_BIN="hermes"
+        HERMES_INSTALLED=true
+    elif [[ -x "$HOME/.hermes/hermes-agent/venv/bin/hermes" ]]; then
+        HERMES_BIN="$HOME/.hermes/hermes-agent/venv/bin/hermes"
+        HERMES_INSTALLED=true
+    fi
+    if $HERMES_INSTALLED; then
+        HERMES_VERSION=$($HERMES_BIN --version 2>/dev/null | head -1 || echo "unknown")
+        if $HERMES_BIN update --check 2>/dev/null | grep -qi "update available\|behind"; then
+            HERMES_UPDATE_AVAILABLE=true
+        fi
+    fi
+}
+
+show_hermes_status() {
+    if ! $HERMES_INSTALLED; then
+        echo -e "     ${YEL}⚠${R}  Not installed"
+        return
+    fi
+    echo -e "     ${GRN}✓${R} Installed ${DIM}($HERMES_VERSION)${R}"
+    local model provider
+    model=$(python3 -c "
+import yaml
+try:
+    c = yaml.safe_load(open('$HERMES_CONFIG'))
+    print(c.get('model', {}).get('default', 'unknown'))
+except: print('unknown')
+" 2>/dev/null || echo "unknown")
+    provider=$(python3 -c "
+import yaml
+try:
+    c = yaml.safe_load(open('$HERMES_CONFIG'))
+    print(c.get('model', {}).get('provider', 'unknown'))
+except: print('unknown')
+" 2>/dev/null || echo "unknown")
+    echo -e "     ${DIM}Model:${R} ${B}$model${R} ${DIM}| Provider:${R} ${B}$provider${R}"
+    if systemctl --user is-active hermes-gateway &>/dev/null 2>&1; then
+        echo -e "     ${GRN}✓${R} Gateway running"
+    else
+        echo -e "     ${YEL}⚠${R}  Gateway not running"
+    fi
+    local aux_count
+    aux_count=$(python3 -c "
+import yaml
+try:
+    c = yaml.safe_load(open('$HERMES_CONFIG'))
+    aux = c.get('auxiliary', {})
+    print(sum(1 for v in aux.values() if v.get('provider') in ('ollama', 'llamacpp')))
+except: print(0)
+" 2>/dev/null || echo "0")
+    if [[ "$aux_count" -gt 0 ]]; then
+        echo -e "     ${GRN}✓${R} ${B}$aux_count${R} auxiliary slots using ${BACKEND_LABEL}"
+    fi
+    if $HERMES_UPDATE_AVAILABLE; then
+        echo -e "     ${BYEL}📦 Update available!${R} ${DIM}Run: hermes update${R}"
+    fi
+}
+
+offer_hermes_install() {
+    echo
+    echo -e "  ${BYEL}🤖 Hermes Agent is not installed.${R}"
+    echo -e "  ${DIM}Hermes is an AI assistant by Nous Research that can use${R}"
+    echo -e "  ${DIM}your local ${BACKEND_LABEL} models for background tasks.${R}"
+    echo
+    echo -e "  ${DIM}Features:${R}"
+    echo -e "    ${DIM}• Chat with local or cloud models${R}"
+    echo -e "    ${DIM}• Delegate coding tasks to local LLM${R}"
+    echo -e "    ${DIM}• Vision, compression, search via ${BACKEND_LABEL}${R}"
+    echo -e "    ${DIM}• Telegram, Discord, Slack integration${R}"
+    echo -e "    ${DIM}• Scheduled tasks and MCP tools${R}"
+    echo
+    read -rp "$(echo -e "  ${BYEL}Install Hermes Agent now? [y/N] ${R}")" install_hermes
+    if [[ "$install_hermes" =~ ^[Yy]$ ]]; then
+        step "⬇️  Installing Hermes Agent..."
+        if ! $DRY_RUN; then
+            curl -fsSL https://raw.githubusercontent.com/nousresearch/hermes-agent/main/install.sh | bash
+            detect_hermes
+            if $HERMES_INSTALLED; then
+                ok "${BGRN}✓ Hermes Agent installed.${R}"
+                info "Run ${CYN}hermes setup${R} to configure your provider and model."
+            else
+                warn "Installation may have partially succeeded."
+                warn "Check: ${CYN}https://hermes-agent.nousresearch.com/docs${R}"
+            fi
+        else
+            echo -e "    ${DIM}▫ [dry-run]${R} curl ... | bash"
+        fi
+    else
+        info "Install later with: ${CYN}hermes-agent.nousresearch.com/docs${R}"
+    fi
+}
+
+# Run Hermes detection
+detect_hermes
+
 # UNINSTALL
 # ═══════════════════════════════════════════════════════════════
 if $UNINSTALL; then
@@ -1088,6 +1195,24 @@ if ! $MODELS_ONLY; then
 
     echo
     ok "${BGRN}✓ Pre-flight checks passed.${R}"
+
+    # ── Hermes Agent status ──
+    echo
+    echo -e "  ${B}🤖 Hermes Agent:${R}"
+    show_hermes_status
+    if ! $HERMES_INSTALLED; then
+        offer_hermes_install
+    fi
+    if $HERMES_INSTALLED && $HERMES_UPDATE_AVAILABLE && ! $DRY_RUN; then
+        echo
+        read -rp "$(echo -e "  ${BYEL}📦 Update Hermes now? [y/N] ${R}")" update_hermes
+        if [[ "$update_hermes" =~ ^[Yy]$ ]]; then
+            step "📦 Updating Hermes Agent..."
+            $HERMES_BIN update --yes 2>/dev/null || warn "Update failed."
+            detect_hermes
+            ok "Updated to: ${B}$HERMES_VERSION${R}"
+        fi
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -1676,8 +1801,13 @@ if ! $DRY_RUN; then
     if [[ -n "$HERMES_MODE" && "$HERMES_MODE" != "ask" ]]; then
         echo
         echo -e "  ${B}🤖 Hermes preset:${R} ${BMAG}${HERMES_MODE}${R}"
+        show_hermes_status
         BACKUP=$(ls -t ${HERMES_CONFIG}.bak.* 2>/dev/null | head -1)
         [[ -n "$BACKUP" ]] && echo -e "    ${DIM}💾 Backup:${R} ${CYN}${BACKUP}${R}"
+    elif $HERMES_INSTALLED; then
+        echo
+        echo -e "  ${B}🤖 Hermes Agent:${R}"
+        show_hermes_status
     fi
 else
     echo -e "  ${BYEL}⚠ [dry-run] No changes were made.${R}"
