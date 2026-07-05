@@ -2,39 +2,11 @@
 
 # 🦙 Ollama + 🤖 Hermes Agent Setup
 
-### Automated Ollama installer with **Hermes Agent preset integration**
-### Tailored for CPU-only VPS environments
+### Automated Ollama installer with hardware detection and **Hermes Agent preset integration**
+
+**Works on any Linux server — CPU or GPU, 4 GB or 128 GB RAM.**
 
 </div>
-
----
-
-<div align="center">
-
-| 🖥️ CPU | 💾 RAM | 💿 Disk | 🎮 GPU | 🐧 OS |
-|---|---|---|---|---|
-| Ryzen 5 3600 (6C/12T) | 64 GB | 349 GB | ❌ None | Debian 13 |
-
-</div>
-
----
-
-## 📖 Table of Contents
-
-- [✨ What This Does](#-what-this-does)
-- [🚀 Quick Start](#-quick-start)
-- [📋 Requirements](#-requirements)
-- [🤖 Hermes Agent Presets](#-hermes-agent-presets)
-- [🎛️ Script Flags](#️-script-flags)
-- [🔧 What the Script Does](#-what-the-script-does)
-- [🎯 Hermes Auxiliary Slots](#-hermes-auxiliary-slots)
-- [📦 Model Recommendations](#-model-recommendations)
-- [🔌 REST API](#-rest-api)
-- [🔒 Security](#-security)
-- [📂 File Locations](#-file-locations)
-- [🛠️ Troubleshooting](#️-troubleshooting)
-- [🗑️ Uninstall](#️-uninstall)
-- [⌨️ Daily Commands](#️-daily-commands)
 
 ---
 
@@ -42,12 +14,15 @@
 
 A single Bash script that:
 
-1. 📥 **Installs Ollama** on Debian/Ubuntu (via official install script)
-2. ⚙️ **Tunes systemd** for CPU-only inference (threads, parallelism, keep-alive)
-3. 📦 **Downloads models** appropriate to your chosen preset
-4. 🤖 **Configures Hermes Agent** with one of three presets for model routing
+1. 🔍 **Detects your hardware** — CPU cores, RAM, swap, disk, GPU + VRAM
+2. 📊 **Classifies your machine** into a hardware tier (tiny → GPU large)
+3. 🎯 **Recommends models** that fit your available resources
+4. 📥 **Installs Ollama** on Debian/Ubuntu (via official install script)
+5. ⚙️ **Tunes systemd** — threads, parallelism, and max-loaded-models auto-configured
+6. 📦 **Downloads models** appropriate to your hardware and chosen preset
+7. 🤖 **Configures Hermes Agent** with one of three presets for model routing
 
-> **Designed for servers without a GPU** — all inference runs on CPU.
+> No manual configuration needed — the script figures out what will work on your machine.
 
 ---
 
@@ -56,12 +31,11 @@ A single Bash script that:
 ### Option A: Interactive Menu (easiest)
 
 ```bash
-# 📥 Clone
 git clone https://github.com/jphermans/ollama-hermes-setup.git
 cd ollama-hermes-setup
 chmod +x ollama-setup.sh
 
-# 🎮 Run with no arguments — interactive menu appears
+# Run with no arguments — interactive menu appears
 bash ollama-setup.sh
 ```
 
@@ -97,10 +71,10 @@ You'll see:
 ### Option B: Direct Flags
 
 ```bash
-# 🤖 Install with interactive preset chooser
+# Install with interactive preset chooser
 bash ollama-setup.sh --hermes
 
-# ⚡ Or go straight to the recommended hybrid preset
+# Go straight to the recommended hybrid preset
 bash ollama-setup.sh --hermes-hybrid
 ```
 
@@ -114,19 +88,65 @@ bash ollama-setup.sh --dry-run --hermes-hybrid
 
 ---
 
+## 🔍 Hardware Detection
+
+The script automatically detects your hardware and picks the right models. Here's how it classifies your machine:
+
+| Tier | Condition | Recommended Models | Speed |
+|---|---|---|---|
+| 🟢 **GPU Large** | NVIDIA GPU with 24 GB+ VRAM | qwen2.5:32b, gemma3:12b | ⚡ Very fast |
+| 🟢 **GPU Mid** | NVIDIA GPU with 12–24 GB VRAM | gemma4, gemma3:12b | ⚡ Fast |
+| 🟡 **GPU Small** | NVIDIA GPU with 6–12 GB VRAM | gemma4, gemma3:12b | ⚡ Fast |
+| 🟠 **GPU Tiny** | NVIDIA GPU with <6 GB VRAM | llama3.1:8b | 🟡 Moderate |
+| 🔵 **CPU High** | 32 GB+ RAM, no GPU | gemma4, gemma3:12b | 🟡 Moderate |
+| 🟡 **CPU Mid** | 16–32 GB RAM, no GPU | llama3.1:8b, gemma3:12b | 🟡 Moderate |
+| 🟠 **CPU Low** | 8–16 GB RAM, no GPU | llama3.2:3b | 🐢 Slow |
+| 🔴 **CPU Tiny** | <8 GB RAM, no GPU | llama3.2:1b | 🐢 Very slow |
+
+### What Gets Auto-Configured
+
+| Setting | How it's determined |
+|---|---|
+| `OLLAMA_NUM_THREAD` | Set to your physical CPU core count |
+| `OLLAMA_MAX_LOADED_MODELS` | 1 on low-RAM, 2–3 on high-RAM/GPU |
+| Model sizes | Scaled to fit your RAM/VRAM |
+| `OLLAMA_NUM_PARALLEL` | Always 1 (safest for stability) |
+
+### What Gets Detected
+
+```
+    ┌──────────────────────────────────────────────┐
+    │  🧠 DETECTED HARDWARE                        │
+    ├──────────────────────────────────────────────┤
+    │  🖥️  OS            Debian GNU/Linux 13       │
+    │  🏗️  Arch          x86_64                    │
+    │  ⚡ CPU            6c/12t                     │
+    │      AMD Ryzen 5 3600 6-Core Processor       │
+    │  💾 RAM            63 GB                     │
+    │      + 31 GB swap                            │
+    │  💿 Disk           349 GB free               │
+    │  🎮 GPU            None (CPU-only)           │
+    ├──────────────────────────────────────────────┤
+    │  📊 Tier           🔵 CPU High (32GB+ RAM)   │
+    └──────────────────────────────────────────────┘
+```
+
+---
+
 ## 📋 Requirements
 
 | Requirement | Details |
 |---|---|
 | 🐧 **OS** | Debian 12/13, Ubuntu 22.04+ (other Linux works but unsupported) |
-| 🏗️ **Architecture** | x86_64 (arm64 works with Ollama but untested) |
-| 💾 **RAM** | 8 GB minimum, 16 GB+ recommended |
-| 💿 **Disk** | 20 GB free minimum |
+| 🏗️ **Architecture** | x86_64 or arm64 |
+| 💾 **RAM** | 4 GB minimum (tiny models only) |
+| 💿 **Disk** | 10 GB free minimum |
 | 📦 **curl** | Required for download |
 | 🔑 **sudo** | Required for systemd service installation |
 | 🤖 **Hermes Agent** | Optional — only needed for `--hermes-*` flags |
+| 🎮 **GPU** | Optional — NVIDIA GPUs auto-detected via `nvidia-smi` |
 
-> 💡 **Not using Hermes?** The script works standalone. Skip the `--hermes-*` flags and you get a fully tuned Ollama installation without any Hermes configuration.
+> 💡 **Not using Hermes?** The script works standalone. Skip the `--hermes-*` flags and you get a fully tuned Ollama installation.
 
 ---
 
@@ -139,26 +159,18 @@ When using [Hermes Agent](https://hermes-agent.nousresearch.com) (by Nous Resear
 | | 🔌 Full Offline | ⚡ Hybrid ⭐ | 🎯 Auxiliary Only |
 |---|---|---|---|
 | **Flag** | `--hermes-offline` | `--hermes-hybrid` | `--hermes-aux` |
-| **💬 Main chat** | 🖥️ gemma4 (local) | ☁️ glm-5.2 (cloud) | ☁️ glm-5.2 (cloud) |
-| **🔀 Delegation** | 🖥️ gemma4 (local) | 🖥️ gemma4 (local) | ☁️ cloud (unchanged) |
-| **🔧 Auxiliary** | 🖥️ gemma3:12b (local) | 🖥️ gemma3:12b (local) | 🖥️ gemma3:12b (local) |
-| **💾 Disk needed** | ~18 GB | ~18 GB | ~8.5 GB |
-| **🧠 RAM loaded** | ~12 GB | ~12 GB | ~7 GB |
+| **💬 Main chat** | 🖥️ local model | ☁️ cloud (unchanged) | ☁️ cloud (unchanged) |
+| **🔀 Delegation** | 🖥️ local model | 🖥️ local model | ☁️ cloud (unchanged) |
+| **🔧 Auxiliary** | 🖥️ local model | 🖥️ local model | 🖥️ local model |
 | **💰 Cloud cost** | 🟢 Zero | 🟡 Reduced | 🔴 Same as now |
 | **🔒 Privacy** | 🟢 Full | 🟡 Partial | 🟡 Partial |
 | **✅ Best for** | Offline / privacy | Daily use | Minimal setup |
 
-### 🤔 Which Preset Should I Pick?
-
-| Preset | When to choose |
-|---|---|
-| 🔌 **Full Offline** | You want zero cloud dependency. All tasks run locally. Best for privacy or unreliable internet. |
-| ⚡ **Hybrid** ⭐ | Cloud quality for main chat, local for everything else. **Best balance of cost and quality.** |
-| 🎯 **Auxiliary Only** | Cloud handles all user-facing work. Local only for background tasks. Lowest local footprint. |
+> 💡 **Which models?** The script picks models automatically based on your hardware tier. See [Hardware Detection](#-hardware-detection) above.
 
 ### 🎨 Customizing Models
 
-Edit the variables at the top of the script:
+The script auto-selects models, but you can override them by editing the variables at the top:
 
 ```bash
 HERMES_MAIN="gemma4:latest"       # 💬 Main conversation model
@@ -173,7 +185,7 @@ HERMES_KANBAN="gemma4:latest"     # 📋 Kanban decomposer (needs reasoning)
 
 | Flag | Description |
 |---|---|
-| *(none)* | 🚀 Full install: pre-flight + install + systemd + starter models |
+| *(none)* | 🎮 Interactive menu |
 | `--hermes` | 🤖 Full install + interactive preset chooser |
 | `--hermes-offline` | 🔌 Full install + full-offline preset (all local) |
 | `--hermes-hybrid` | ⚡ Full install + hybrid preset (cloud main, local aux + delegation) |
@@ -210,28 +222,25 @@ bash ollama-setup.sh --uninstall
 
 ## 🔧 What the Script Does
 
-### 1. 🔍 Pre-flight Checks
-Verifies OS, architecture, RAM, disk space, and CPU cores. Detects existing Ollama installations. Aborts on missing dependencies.
+### 1. 🔍 Hardware Detection
+Detects CPU model, core count, RAM, swap, disk space, and NVIDIA GPU (if present). Classifies the machine into a tier and selects appropriate models. Shows a formatted hardware summary card.
 
 ### 2. 📥 Install Ollama
 Runs the official install script from `ollama.com/install.sh`. Creates `/usr/local/bin/ollama` and a systemd service.
 
 ### 3. ⚙️ Configure systemd
-Writes a performance-tuned systemd override at:
-```
-/etc/systemd/system/ollama.service.d/override.conf
-```
+Writes a performance-tuned systemd override with auto-detected values:
 
 | ⚙️ Setting | 💡 Value | 📝 Why |
 |---|---|---|
-| `OLLAMA_NUM_THREAD` | Auto-detected (physical cores) | Optimal CPU usage without hyperthread thrashing |
-| `OLLAMA_NUM_PARALLEL` | `1` | CPU-only can't handle concurrent inference |
+| `OLLAMA_NUM_THREAD` | Physical CPU cores | Optimal CPU usage without hyperthread thrashing |
+| `OLLAMA_NUM_PARALLEL` | `1` | Safest for stability |
 | `OLLAMA_HOST` | `127.0.0.1:11434` | Localhost only — never expose without auth |
 | `OLLAMA_KEEP_ALIVE` | `5m` | Models stay in RAM 5 min after last use |
-| `OLLAMA_MAX_LOADED_MODELS` | `2` | Allow two models loaded simultaneously |
+| `OLLAMA_MAX_LOADED_MODELS` | 1–3 (by tier) | Scaled to available RAM/VRAM |
 
 ### 4. 📦 Pull Models
-Downloads models appropriate to the selected preset. See [Model Recommendations](#-model-recommendations).
+Downloads models appropriate to your hardware tier and chosen preset.
 
 ### 5. 🤖 Configure Hermes
 Uses `hermes config set` commands to:
@@ -268,50 +277,35 @@ The script configures all local-capable auxiliary slots:
 
 ---
 
-## 📦 Model Recommendations
+## 📦 Model Catalog
 
-### 🏆 Sweet Spot: 7B–12B Models
+The script picks from these models based on your hardware tier:
 
-| 📦 Model | 💾 Size | 🧠 RAM | ⚡ Speed | 📝 Best For |
-|---|---|---|---|---|
-| `gemma3:12b` | ~8.1 GB | ~10 GB | 🟡 6-10 tok/s | All Hermes auxiliary slots |
-| `llama3.1:8b` | ~4.7 GB | ~6 GB | 🟢 10-15 tok/s | General-purpose chat |
-| `qwen2.5:7b` | ~4.7 GB | ~6 GB | 🟢 10-15 tok/s | Multilingual, coding |
-| `mistral:7b` | ~4.1 GB | ~5.5 GB | 🟢 10-15 tok/s | Reasoning |
+### 🏆 General Purpose
 
-### 💬 Conversation / Delegation
-
-| 📦 Model | 💾 Size | 🧠 RAM | ⚡ Speed | 📝 Best For |
-|---|---|---|---|---|
-| `gemma4:latest` | ~9.6 GB | ~11 GB | 🟡 8-12 tok/s | Main conversation + delegation |
-| `qwen2.5:14b` | ~8.9 GB | ~10 GB | 🟡 6-10 tok/s | Strong reasoning |
-| `deepseek-r1:14b` | ~8.9 GB | ~10 GB | 🟡 6-10 tok/s | Chain-of-thought reasoning |
+| Model | Size | Min RAM | Hardware Tier |
+|---|---|---|---|
+| `llama3.2:1b` | ~1.3 GB | 4 GB | 🔴 CPU Tiny |
+| `llama3.2:3b` | ~2.0 GB | 8 GB | 🟠 CPU Low |
+| `llama3.1:8b` | ~4.7 GB | 8–16 GB | 🟡 CPU Mid / 🟠 GPU Tiny |
+| `gemma3:12b` | ~8.1 GB | 16 GB | 🔵 CPU High / 🟡 GPU Small |
+| `gemma4:latest` | ~9.6 GB | 16–32 GB | 🔵 CPU High / 🟢 GPU Mid |
+| `qwen2.5:32b` | ~19 GB | 32 GB+ | 🟢 GPU Large |
 
 ### 🔣 Embeddings
 
-| 📦 Model | 💾 Size | 📝 Best For |
+| Model | Size | Notes |
 |---|---|---|
-| `nomic-embed-text` | ~137 MB | Default embeddings for Hermes |
-| `mxbai-embed-large` | ~670 MB | Top-tier retrieval |
-| `bge-m3` | ~1.2 GB | Multilingual embeddings |
+| `nomic-embed-text` | ~137 MB | Default — tiny, loads instantly |
 
 ### 💻 Coding
 
-| 📦 Model | 💾 Size | 📝 Best For |
+| Model | Size | Notes |
 |---|---|---|
-| `qwen2.5-coder:7b` | ~4.7 GB | Code generation & completion |
-| `qwen2.5-coder:14b` | ~8.9 GB | Complex multi-file coding |
-| `deepseek-coder-v2:16b` | ~8.9 GB | Multi-language coding |
+| `qwen2.5-coder:7b` | ~4.7 GB | Good for mid-range hardware |
+| `qwen2.5-coder:14b` | ~8.9 GB | Needs 16 GB+ RAM |
 
-### 🐢 Large Models (Slow on CPU)
-
-| 📦 Model | 💾 Size | ⚡ Speed | ⚠️ Note |
-|---|---|---|---|
-| `qwen2.5:32b` | ~19 GB | 🔴 3-5 tok/s | Batch processing only |
-| `command-r:35b` | ~17 GB | 🔴 2-4 tok/s | RAG & tool use |
-| `llama3.1:70b` | ~40 GB | 🔴 1-3 tok/s | Feasible but very slow |
-
-> ⚠️ **70B models will run** (you have the RAM), but CPU-only inference at 1-3 tokens/sec is only practical for background/batch tasks, not real-time chat.
+> 📝 **Want a model not listed?** Just pull it manually: `ollama pull <model-name>`
 
 ---
 
@@ -441,10 +435,27 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama
 <details>
 <summary><b>🐌 Slow responses</b></summary>
 
-This is expected on CPU-only inference. Options:
+CPU-only inference is slower than GPU. Options:
 - Switch to the **hybrid** preset (cloud for main chat)
 - Use smaller models (7B instead of 12B)
-- Check speed: the response metadata includes tokens/sec
+- Check if a GPU is available: `nvidia-smi`
+- The script auto-selects models that fit your hardware — trust the tier detection
+</details>
+
+<details>
+<summary><b>🎮 GPU not detected</b></summary>
+
+The script uses `nvidia-smi` for GPU detection. If you have a GPU but it's not showing:
+```bash
+# Check if nvidia-smi works
+nvidia-smi
+
+# If not, install NVIDIA drivers
+sudo apt install nvidia-driver-535  # or latest for your system
+
+# Verify CUDA is available to Ollama
+ollama ps  # Should show GPU memory in the output
+```
 </details>
 
 ---
@@ -500,15 +511,5 @@ journalctl --user -u hermes-gateway -f   # 📝 Gateway logs
 ## 📄 License
 
 **MIT** — See [LICENSE](LICENSE)
-
----
-
-## 👤 Author
-
-**JPHsystems**
-
----
-
-*This script was built for a specific VPS (AMD Ryzen 5 3600, 64 GB RAM, Debian 13, CPU-only) but works on any Debian/Ubuntu server. Adjust the model choices and thread count as needed for your hardware.*
 
 </div>
