@@ -53,14 +53,50 @@ A single Bash script that:
 
 ## 🚀 Quick Start
 
+### Option A: Interactive Menu (easiest)
+
 ```bash
 # 📥 Clone
 git clone https://github.com/jphermans/ollama-hermes-setup.git
 cd ollama-hermes-setup
-
-# 🔓 Make executable
 chmod +x ollama-setup.sh
 
+# 🎮 Run with no arguments — interactive menu appears
+bash ollama-setup.sh
+```
+
+You'll see:
+
+```
+  Welcome! What would you like to do?
+
+   1  🚀 Full Install + Hermes Hybrid ⭐
+     Install Ollama + tune systemd + download models
+     Configure Hermes with the recommended hybrid preset
+
+   2  ⚙️  Full Install Only
+     Install Ollama + tune systemd + download starter models
+     No Hermes configuration (standalone Ollama)
+
+   3  🤖 Configure Hermes Only
+     Ollama is already installed — just set up Hermes presets
+     Shows the preset chooser (offline / hybrid / aux-only)
+
+   4  📦 Download Models Only
+     Pull specific models without installing or configuring
+
+   5  👁️  Dry Run Preview
+     See exactly what would happen without changing anything
+
+   6  🗑️  Uninstall Ollama
+     Remove Ollama, service, models, and user account
+
+   q  Exit
+```
+
+### Option B: Direct Flags
+
+```bash
 # 🤖 Install with interactive preset chooser
 bash ollama-setup.sh --hermes
 

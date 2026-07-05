@@ -3,7 +3,8 @@
 #  🦙 Ollama Installer for JPHsystems VPS
 #  Target: Debian 13 (trixie) · Ryzen 5 3600 · 64 GB RAM · CPU-only
 #
-#  Usage:  bash ollama-setup.sh
+#  Usage:  bash ollama-setup.sh              # Interactive menu
+#          bash ollama-setup.sh [flags]       # Direct mode
 #
 #  Flags:
 #    --no-models       Skip downloading starter models
@@ -97,7 +98,21 @@ for arg in "$@"; do
         --hermes-aux)      HERMES_MODE="aux" ;;
         --hermes-reset)    HERMES_MODE="reset" ;;
         --help|-h)
-            head -20 "$0"
+            echo -e "\n  ${B}🦙 Ollama + 🤖 Hermes Agent Setup Script${R}\n"
+            echo -e "  ${B}Usage:${R}"
+            echo -e "    ${CYN}bash ollama-setup.sh${R}                 ${DIM}# Interactive menu${R}"
+            echo -e "    ${CYN}bash ollama-setup.sh [flags]${R}        ${DIM}# Direct mode${R}\n"
+            echo -e "  ${B}Flags:${R}"
+            echo -e "    ${CYN}--hermes-hybrid${R}   ${DIM}Install + hybrid preset (recommended)${R}"
+            echo -e "    ${CYN}--hermes-offline${R}  ${DIM}Install + full offline preset${R}"
+            echo -e "    ${CYN}--hermes-aux${R}      ${DIM}Install + auxiliary-only preset${R}"
+            echo -e "    ${CYN}--hermes${R}          ${DIM}Install + interactive preset chooser${R}"
+            echo -e "    ${CYN}--hermes-reset${R}    ${DIM}Reset Hermes to cloud/auto defaults${R}"
+            echo -e "    ${CYN}--models-only${R}     ${DIM}Skip install, only pull models${R}"
+            echo -e "    ${CYN}--no-models${R}       ${DIM}Skip model downloads${R}"
+            echo -e "    ${CYN}--dry-run${R}         ${DIM}Preview without changes${R}"
+            echo -e "    ${CYN}--uninstall${R}       ${DIM}Remove Ollama completely${R}"
+            echo -e "    ${CYN}--help${R}            ${DIM}Show this help${R}\n"
             exit 0
             ;;
         *)
@@ -109,6 +124,73 @@ done
 
 # Show banner
 banner
+
+# ═══════════════════════════════════════════════════════════════
+# INTERACTIVE MAIN MENU (when no arguments are passed)
+# ═══════════════════════════════════════════════════════════════
+if [[ $# -eq 0 ]]; then
+    echo -e "  ${B}Welcome! What would you like to do?${R}"
+    echo
+    echo -e "  ${BG_GRN}${WHT}${B} 1 ${R} ${BGRN}🚀 Full Install + Hermes Hybrid${R} ${BGRN}⭐${R}"
+    echo -e "     ${DIM}Install Ollama + tune systemd + download models${R}"
+    echo -e "     ${DIM}Configure Hermes with the recommended hybrid preset${R}"
+    echo -e "     ${DIM}(cloud for chat, local for background tasks)${R}"
+    echo
+    echo -e "  ${BG_BLU}${WHT}${B} 2 ${R} ${BBLU}⚙️  Full Install Only${R}"
+    echo -e "     ${DIM}Install Ollama + tune systemd + download starter models${R}"
+    echo -e "     ${DIM}No Hermes configuration (standalone Ollama)${R}"
+    echo
+    echo -e "  ${BG_MAG}${WHT}${B} 3 ${R} ${BMAG}🤖 Configure Hermes Only${R}"
+    echo -e "     ${DIM}Ollama is already installed — just set up Hermes presets${R}"
+    echo -e "     ${DIM}Shows the preset chooser (offline / hybrid / aux-only)${R}"
+    echo
+    echo -e "  ${BG_YEL}${WHT}${B} 4 ${R} ${BYEL}📦 Download Models Only${R}"
+    echo -e "     ${DIM}Pull specific models without installing or configuring${R}"
+    echo
+    echo -e "  ${BG_CYN}${WHT}${B} 5 ${R} ${BCYN}👁️  Dry Run Preview${R}"
+    echo -e "     ${DIM}See exactly what would happen without changing anything${R}"
+    echo
+    echo -e "  ${BG_RED}${WHT}${B} 6 ${R} ${BRED}🗑️  Uninstall Ollama${R}"
+    echo -e "     ${DIM}Remove Ollama, service, models, and user account${R}"
+    echo
+    echo -e "  ${DIM} q  Exit${R}"
+    echo
+
+    read -rp "$(echo -e "  ${BYEL}▶ Select an option [1-6/q]: ${R}")" menu_choice
+
+    case "$menu_choice" in
+        1)
+            HERMES_MODE="hybrid"
+            ;;
+        2)
+            # Full install, no Hermes — defaults are fine
+            ;;
+        3)
+            MODELS_ONLY=true
+            HERMES_MODE="ask"
+            ;;
+        4)
+            MODELS_ONLY=true
+            ;;
+        5)
+            DRY_RUN=true
+            HERMES_MODE="hybrid"
+            ;;
+        6)
+            UNINSTALL=true
+            ;;
+        q|Q|quit|exit)
+            echo -e "  ${DIM}Bye! 👋${R}"
+            exit 0
+            ;;
+        *)
+            err "Invalid option: ${BRED}$menu_choice${R}"
+            echo -e "  ${DIM}Tip: Run ${CYN}bash ollama-setup.sh --help${R} to see all flags.${R}"
+            exit 2
+            ;;
+    esac
+    echo
+fi
 
 # Dry-run wrapper
 run() {
